@@ -1,0 +1,643 @@
+clear all
+close all
+clc
+
+[parentdir,~,~]=fileparts(pwd);
+
+
+%% Style choices
+colors.dark = {'#ef476f' '#ffd166' '#06d6a0' '#118ab2' '#adb5bd'};
+colors.light = {'#f7cad0' '#ffea00' '#b7e4c7' '#a2d2ff'};
+
+colors.anal  = {'#2d00f7' '#ff5400' '#f20089'};
+smoothWindow = 1;
+miss_thr = Inf;  % maximum upscaling of case count
+thin  = 1;
+thick = 5; 
+fontSize = 12;
+
+% time horizon, ticks and labels throughout the year
+T_end = 360;
+XLim_year = [0 366];
+XTick_months = cumsum([0 31 29 31 30 31 30 31 31 30 31 30 31]);
+XTickLabel_months = {'Jan' '' '' 'Apr' '' '' 'Jul' '' '' 'Oct' '' '' 'Jan'};
+
+
+%% Load raw data
+RAW   = load([parentdir '/data_imported/data.mat']);
+A         = RAW.A;
+W         = RAW.W(:,:,1:T_end);
+C         = RAW.C(:,1:T_end);
+T         = RAW.T(:,1:T_end);
+N         = RAW.N(:,1:T_end);
+G         = RAW.G;
+groups    = RAW.groups;
+Z2G       = RAW.Z2G;
+miss_rate = RAW.miss_rate;
+
+ZIP_name  = RAW.ZIP_name;
+census    = RAW.census; 
+
+
+%% Should small/heterophil ZIPs be combined?
+COMBINE = 'N';
+switch COMBINE
+    case 'Y'
+        ZIPs_to_combine = [60601 60602 60603 60604 60605 60606 60654 60661];
+        [A, W, C, T, N, G, Z2G, ZIP_name, comb, census] = ZIP_Combine(A, W, C, T, N, G, Z2G, ZIP_name, ZIPs_to_combine, census);
+        targetName = [parentdir '/figures/combined'];
+        ZIP.census = census;
+    case 'N'
+        targetName = [parentdir '/figures/original'];
+        ZIP.census = census;
+end
+
+
+%% Group names corrected
+for g = 1:length(G)
+    str = char(strrep(groups(g),'_',' '));
+    str=lower(str);
+    idx=regexp([' ' str],'(?<=\s+)\S','start')-1;
+    str(idx)=upper(str(idx));
+    group.name{g} = str;    
+end
+
+%% ZIP stats
+for g = 1:length(G)
+   for i = 1:length(G{g})
+    ZIP.trip(G{g}(i),:) = squeeze(sum(W(G{g}(i),:,:),2));
+   end
+end
+ZIP.pop      = N;
+ZIP.tripRate = ZIP.trip./ZIP.pop;
+ZIP.W = W;
+ZIP.name = ZIP_name;
+ZIP.area   = A;
+ZIP.case = C;   % reported
+
+%% Group stats
+group.ZIPs = G;
+for g = 1:length(G)
+    % all [group] x [time]
+    group.pop(g,:)   = sum(N(G{g},:),1);
+    group.trip(g,:)  = sum(W(G{g},:,:),[1 2]);
+    group.test(g,:)  = sum(T(G{g},:),1); 
+    group.case(g,:)  = sum(C(G{g},:),1);
+    group.area(g) = sum(ZIP.area(group.ZIPs{g}));
+
+    group.tripRate(g,:) = group.trip(g,:)./group.pop(g,:);
+    group.testRate(g,:) = group.test(g,:)./group.pop(g,:);
+    group.caseRate(g,:) = group.case(g,:)./group.pop(g,:);
+end
+
+%% City stats
+city.pop  = sum(group.pop,1);
+city.trip = sum(group.trip,1);
+city.tripRate = city.trip./city.pop;
+city.Z2G  = Z2G;
+city.area = sum(group.area);
+
+
+%% City vs county and testing
+figure('Position',[0 0 1000 250])
+tlt = tiledlayout(1, 4);
+tlt.Padding = 'none';
+tlt.TileSpacing = 'compact';
+
+nexttile
+plot(1e-3*RAW.C_rep,'LineWidth',thick)
+hold on
+plot(1e-3*RAW.C_est,'LineWidth',thick)
+axis square
+grid on
+xlim(XLim_year)
+ylabel('case count (1k)')
+set(gca,'XTick',XTick_months,'XTickLabel',XTickLabel_months)
+xtickangle(0)
+title('estimated and reported (county)')
+
+nexttile()
+plot(miss_rate,'LineWidth',thick)
+axis square
+grid on
+xlim(XLim_year)
+ylim([1e0 1e3])
+ylabel('\xi')
+set(gca,'XTick',XTick_months,'XTickLabel',XTickLabel_months,'YScale','log')
+xtickangle(0)
+title('estimated per reported (county)')
+
+nexttile
+plot(1e-3*sum(C,1),'LineWidth',thick)
+hold on
+plot(1e-3*sum(C,1).*miss_rate(1:size(C,2))','LineWidth',thick)
+axis square
+grid on
+xlim(XLim_year)
+ylabel('case count (1k)')
+set(gca,'XTick',XTick_months,'XTickLabel',XTickLabel_months)
+xtickangle(0)
+title('estimated and reported (city)')
+
+nexttile
+plot(cumsum(1e-6*sum(C,1)),'LineWidth',thick)
+hold on
+plot(cumsum(1e-6*sum(C,1).*miss_rate(1:size(C,2))'),'LineWidth',thick)
+axis square
+grid on
+xlim(XLim_year)
+ylabel('cumulative case count (1M)')
+set(gca,'XTick',XTick_months,'XTickLabel',XTickLabel_months)
+xtickangle(0)
+title('estimated and reported (city)')
+
+
+set(findall(gcf,'-property','FontSize'),'FontSize',fontSize)
+if strcmp(COMBINE,'N')
+    print(gcf,[targetName '/covidestim.eps'],'-depsc') 
+end
+
+
+
+
+%% Test upscaling
+for t = 1:size(C,2)
+    denom = 0;
+    for g = 1:length(G)
+        for i = 1:length(G{g})
+            index = G{g}(i); 
+            denom = denom + C(index,t)/group.testRate(g,t);
+        end
+    end
+    case_estimate = miss_rate(t)*sum(C(:,t));
+    xi0(t) = case_estimate/denom;
+    
+    for g = 1:length(G)
+       group.testScale(g,t) = xi0(t)/group.testRate(g,t);
+    end
+end
+group.caseEst = group.case.*group.testScale;
+group.caseEst(isnan(group.caseEst)) = 0;
+
+% ZIPs
+for g = 1:length(G)
+    for i = 1:length(G{g}) 
+        ZIP.caseEst(G{g}(i),:) = group.testScale(g,:).*C(G{g}(i),:);
+    end
+end
+ZIP.caseEst(isnan(ZIP.caseEst)) = 0;
+
+% City
+city.caseEst = sum(group.caseEst,1);
+
+
+%% Census data
+for g = 1:4
+    index = group.ZIPs{g};
+    group.census.pop(g)     = sum(ZIP.census.pop(index));
+    group.census.hhold(g)   = ZIP.census.hhold(index)'*ZIP.census.pop(index)/group.census.pop(g);
+    group.census.income(g)  = ZIP.census.income(index)'*ZIP.census.pop(index)/group.census.pop(g);
+    group.census.hval(g)    = ZIP.census.hval(index)'*ZIP.census.pop(index)/group.census.pop(g);
+    group.census.hyear(g)   = ZIP.census.hyear(index)'*ZIP.census.pop(index)/group.census.pop(g);
+    group.census.hage(g)    = ZIP.census.hage(index)'*ZIP.census.pop(index)/group.census.pop(g);
+    group.census.foreign(g) = ZIP.census.foreign(index)'*ZIP.census.pop(index)/group.census.pop(g);
+    group.census.ptrans(g)  = ZIP.census.ptrans(index)'*ZIP.census.pop(index)/group.census.pop(g);
+    group.census.health(g)  = ZIP.census.health(index)'*ZIP.census.pop(index)/group.census.pop(g);
+    group.census.worker(g)  = ZIP.census.worker(index)'*ZIP.census.pop(index)/group.census.pop(g);   
+    group.census.poverty(g) = ZIP.census.poverty(index)'*ZIP.census.pop(index)/group.census.pop(g);
+    group.census.insur(g)   = ZIP.census.insur(index)'*ZIP.census.pop(index)/group.census.pop(g);
+    group.census.ocrowd(g)  = ZIP.census.ocrowd(index)'*ZIP.census.pop(index)/group.census.pop(g);
+    group.census.bo50(g)    = ZIP.census.bo50(index)'*ZIP.census.pop(index)/group.census.pop(g);
+end
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%       Movement and demographic plots         %%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+% Policy timeline
+figure('Position',[0 0 1000 1000])
+tlt = tiledlayout(3, 1);
+tlt.Padding = 'none';
+tlt.TileSpacing = 'compact';
+
+movmean_window = 7;
+
+dates = [3 18 ; 3 26 ; 4 8 ; 7 4 ; 7 24 ; 8 26 ; 10 23 ; 11 16 ; 11 20];
+dates = [2020*ones(size(dates,1),1) dates];
+day_of_year = datenum(dates) - datenum([2020 1 1]);
+
+
+for i = 1:3
+    nexttile(i)
+    hold on
+    grid on
+    for j = 1:length(day_of_year)
+        plot([day_of_year(j) day_of_year(j)],[0 100],'LineWidth',1,'Color','k')
+    end
+    set(gca,'XTick',XTick_months,'XTickLabel',XTickLabel_months)
+    xlim(XLim_year)
+    xtickangle(0)
+end
+
+for g = 1:length(G)
+    nexttile(1)
+    plot(movmean(100*group.caseRate(g,:),movmean_window),'LineWidth',thick,'Color',colors.dark{g})
+    
+    nexttile(2)
+    plot(movmean(group.tripRate(g,:),movmean_window),'LineWidth',thick,'Color',colors.dark{g})
+        
+    nexttile(3)
+    group_homo = squeeze(sum(ZIP.W(group.ZIPs{g},group.ZIPs{g},:),[1 2]))'./group.trip(g,:);
+    plot(movmean(100*group_homo,movmean_window),'LineWidth',thick,'Color',colors.dark{g})
+    group.homophilyRate(g,:) = 100*group_homo;
+end
+nexttile(1)
+ylabel('case rate (%)')
+ylim([0 0.15])
+
+nexttile(2)
+ylabel('trip rate')
+ylim([5 11])
+
+nexttile(3)
+ylabel('homophily (%)')
+ylim([84 96])
+
+
+set(findall(gcf,'-property','FontSize'),'FontSize',fontSize)  
+print(gcf,[targetName '/policy_data.eps'],'-depsc') 
+
+
+before.days = [1:75];
+after.days  = [76:360]; 
+before.tripRate = mean(group.tripRate(:,before.days),2);
+after.tripRate = mean(group.tripRate(:,after.days),2);
+
+before.homophilyRate = mean(group.homophilyRate(:,before.days),2);
+after.homophilyRate = mean(group.homophilyRate(:,after.days),2);
+
+[before.tripRate after.tripRate 100*(after.tripRate-before.tripRate)./before.tripRate]
+[before.homophilyRate after.homophilyRate (after.homophilyRate-before.homophilyRate)]
+
+[homo_before homo_after homo_hypo] = Homophily_matching(ZIP,group,before,after);
+
+
+
+
+
+
+
+
+
+%% Population summary for each group
+figure('Position',[0 0 1000 500])
+tlt = tiledlayout(2, 4);
+tlt.Padding = 'none';
+tlt.TileSpacing = 'compact';
+
+for g = 1:length(G)
+    nexttile
+    hold on
+    for i = 1:length(G{g})
+        plot(1e-4*ZIP.pop(G{g}(i),:),'LineWidth',thin,'Color',colors.light{g})
+    end
+    axis square
+    grid on
+    xlim(XLim_year)
+    ylim([0 15])
+    ylabel('population (10k)')
+    set(gca,'XTick',XTick_months,'XTickLabel',XTickLabel_months)
+    xtickangle(0)
+    title(group.name{g})
+end
+for g = 1:length(G)
+    nexttile
+    plot(1e-6*group.pop(g,:),'LineWidth',thick,'Color',colors.dark{g})
+    axis square
+    grid on
+    xlim(XLim_year)
+    ylim([0 1])
+    ylabel('population (M)')
+    set(gca,'XTick',XTick_months,'XTickLabel',XTickLabel_months)
+    xtickangle(0)
+    title(group.name{g})
+end
+set(findall(gcf,'-property','FontSize'),'FontSize',fontSize)  
+print(gcf,[targetName '/population.eps'],'-depsc') 
+
+
+%% Trip rate summary
+figure('Position',[0 0 1000 250])
+tlt = tiledlayout(1, 4);
+tlt.Padding = 'none';
+tlt.TileSpacing = 'compact';
+
+for g = 1:length(G)
+    nexttile
+    hold on
+    for i = 1:length(G{g})
+        plot(ZIP.tripRate(G{g}(i),:),'LineWidth',thin,'Color',colors.light{g})
+    end
+    plot(group.tripRate(g,:),'LineWidth',thick,'Color',colors.dark{g})
+    axis square
+    grid on
+    xlim(XLim_year)
+    ylim([0 20])
+    ylabel('trip rate')
+    set(gca,'XTick',XTick_months,'XTickLabel',XTickLabel_months)
+    xtickangle(0)
+    title(group.name{g})
+end
+% sgtitle('Trip rate summary')
+set(findall(gcf,'-property','FontSize'),'FontSize',fontSize) 
+print(gcf,[targetName '/tripRate.eps'],'-depsc')
+
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%        Case and test rate plots         %%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% Reported cases for each group
+figure('Position',[0 0 1000 500])
+tlt = tiledlayout(2, 4);
+tlt.Padding = 'none';
+tlt.TileSpacing = 'compact';
+
+for g = 1:length(G)
+    nexttile
+    hold on
+    for i = 1:length(G{g})
+        plot(100*ZIP.case(G{g}(i),:)./ZIP.pop(G{g}(i),:),'LineWidth',thin,'Color',colors.light{g})
+    end
+    plot(100*group.case(g,:)./group.pop(g,:),'LineWidth',thick,'Color',colors.dark{g})
+    axis square
+    grid on
+    xlim(XLim_year)
+    ylim([0 0.25])
+    ylabel('case rate (%)')
+    set(gca,'XTick',XTick_months,'XTickLabel',XTickLabel_months)
+    xtickangle(0)
+    title(group.name{g})
+end
+for g = 1:length(G)
+    nexttile
+    hold on
+    for i = 1:length(G{g})
+        plot(100*cumsum(ZIP.case(G{g}(i),:))./ZIP.pop(G{g}(i),:),'LineWidth',thin,'Color',colors.light{g})
+    end
+    plot(100*cumsum(group.case(g,:))./group.pop(g,:),'LineWidth',thick,'Color',colors.dark{g})
+    axis square
+    grid on
+    xlim(XLim_year)
+    ylim([0 20])
+    ylabel('cumulative case rate (%)')
+    set(gca,'XTick',XTick_months,'XTickLabel',XTickLabel_months)
+    xtickangle(0)
+    title(group.name{g})
+end
+% sgtitle('Trip rate summary')
+set(findall(gcf,'-property','FontSize'),'FontSize',fontSize) 
+print(gcf,[targetName '/caseRate_reported.eps'],'-depsc')
+
+
+
+%% Test data
+figure('Position',[0 0 1000 500])
+tlt = tiledlayout(2, 4);
+tlt.Padding = 'none';
+tlt.TileSpacing = 'compact';
+
+for g = 1:length(G) 
+   nexttile
+   plot(100*[squeeze(T(G{g},:))./N(G{g},:)]','LineWidth',thin,'Color',colors.light{g})
+   hold on
+   plot(100*group.testRate(g,:),'LineWidth',thick,'Color',colors.dark{g})
+   grid on 
+   axis square
+   xlim(XLim_year)
+   ylim([0 1.5])
+   ylabel('test rate (%)')
+   title(group.name{g})
+   set(gca,'XTick',XTick_months,'XTickLabel',XTickLabel_months)
+   xtickangle(0)
+end
+for g = 1:length(G) 
+   nexttile
+   % plot(miss_rate,'Linewidth', thick,'Color', colors.dark{5})
+   hold on
+   plot(group.testScale(g,:),'LineWidth', thick,'Color',colors.dark{g})
+   grid on 
+   axis square
+   xlim(XLim_year)
+   ylim([1e0 1e3])
+   ylabel('case vs positive test')
+   title(group.name{g})
+   set(gca,'XTick',XTick_months,'XTickLabel',XTickLabel_months,'YScale','log')
+   xtickangle(0)
+end
+% sgtitle('Test count summary')
+set(findall(gcf,'-property','FontSize'),'FontSize',fontSize) 
+print(gcf,[targetName '/testRate.eps'],'-depsc')
+
+
+
+%% Case rate summary for each group
+figure('Position',[0 0 1000 500])
+tlt = tiledlayout(2, 4);
+tlt.Padding = 'none';
+tlt.TileSpacing = 'compact';
+
+for g = 1:length(G)
+    nexttile
+    hold on
+    for i = 1:length(G{g})
+        plot(100*ZIP.caseEst(G{g}(i),:)./N(G{g}(i),:),'LineWidth',thin,'Color',colors.light{g})
+    end
+    plot(100*group.caseEst(g,:)./group.pop(g,:),'LineWidth',thick,'Color',colors.dark{g})
+    axis square
+    grid on
+    xlim(XLim_year)
+    ylim([0 1.5])
+    ylabel('case rate (%)')
+    set(gca,'XTick',XTick_months,'XTickLabel',XTickLabel_months)
+    xtickangle(0)
+    title(group.name{g})
+end
+for g = 1:length(G)
+    nexttile
+    hold on
+    for i = 1:length(G{g})
+        plot(100*cumsum(ZIP.caseEst(G{g}(i),:)./N(G{g}(i),:)),'LineWidth',thin,'Color',colors.light{g})
+    end
+    plot(100*cumsum(group.caseEst(g,:)./group.pop(g,:)),'LineWidth',thick,'Color',colors.dark{g})
+    axis square
+    grid on
+    xlim(XLim_year)
+    ylim([0 80])
+    ylabel('cumulative case rate (%)')
+    set(gca,'XTick',XTick_months,'XTickLabel',XTickLabel_months)
+    xtickangle(0)       
+    title(group.name{g})
+end
+% sgtitle('Case count summary')
+set(findall(gcf,'-property','FontSize'),'FontSize',fontSize)  
+print(gcf,[targetName '/caseRate_estimated.eps'],'-depsc')  
+
+
+
+
+
+
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%                         Function snippets                             %%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+%% Combine small ZIPs
+function [A, W, C, T, N, G, Z2G, ZIP_name, comb, census] = ZIP_Combine(A, W, C, T, N, G, Z2G, ZIP_name, ZIPs_to_combine, census)
+
+    for i = 1:length(ZIPs_to_combine)
+       comb(i) = find(ZIP_name==ZIPs_to_combine(i));     
+    end
+    size_before = length(ZIP_name);
+    size_after  = size_before - length(comb) + 1;
+    RIGHT = diag(ones(1,size_before));
+
+    for i = 2:length(comb)
+       RIGHT(comb(i),comb(1)) = 1; 
+    end
+    RIGHT(:,comb(2:end)) = [];
+    LEFT = RIGHT';
+
+    A_comb = LEFT*A;
+    for t = 1:size(C,2)
+        W_comb(:,:,t) = LEFT*W(:,:,t)*RIGHT;
+        C_comb(:,t) = LEFT*C(:,t);
+        T_comb(:,t) = LEFT*T(:,t);
+        N_comb(:,t) = LEFT*N(:,t);
+    end
+    Z2G_comb = Z2G;
+    Z2G_comb(comb(2:end)) = [];
+    for g = 1:4
+        G_comb{g} = find(Z2G_comb==g);
+    end
+    name_comb = ZIP_name;
+    name_comb(comb(2:end)) = [];
+
+    A         = A_comb;
+    W         = W_comb;
+    C         = C_comb;
+    T         = T_comb;
+    N         = N_comb;
+    G         = G_comb;
+    Z2G       = Z2G_comb;
+    ZIP_name  = name_comb;
+    
+    census.name    = ZIP_name;
+    AVE = diag(census.pop)
+    for i = 2:length(comb)
+       AVE(comb(1),comb(i)) = census.pop(comb(i)); 
+    end
+    AVE(comb(2:end),:) = [];
+    census.pop     = sum(AVE,2);
+    AVE = AVE./repmat(sum(AVE,2),1,size(AVE,2));
+    
+    
+    census.hhold   = AVE*census.hhold;
+    census.income  = AVE*census.income;
+    census.hval    = AVE*census.hval;
+    census.hyear   = AVE*census.hyear;
+    census.hage    = AVE*census.hage;
+    census.foreign = AVE*census.foreign;
+    census.ptrans  = AVE*census.ptrans;
+    census.health  = AVE*census.health;
+    census.worker  = AVE*census.worker;
+    census.poverty = AVE*census.poverty;
+    census.insur   = AVE*census.insur;
+    census.ocrowd  = AVE*census.ocrowd;
+    census.bo50    = AVE*census.bo50;
+    
+    
+end
+
+
+
+function [W_sameHomo homo_before homo_after homo_hypo] = Homophily_matching(ZIP,group,before,after)
+    N_nodes = size(ZIP.W,2);
+
+    alpha_vec = logspace(-8,-6,10);
+
+    for g = 1:length(group.ZIPs)
+
+        days = before.days;
+        homo_before(g) = mean(squeeze(sum(ZIP.W(group.ZIPs{g},group.ZIPs{g},days),[1 2]))'./group.trip(g,days));
+
+        days = after.days;
+        homo_after(g) = mean(squeeze(sum(ZIP.W(group.ZIPs{g},group.ZIPs{g},days),[1 2]))'./group.trip(g,days));
+
+        for i = 1:length(alpha_vec)
+            alpha = alpha_vec(i);
+            WL = [];
+            W0 = ZIP.W;
+
+                
+            for t = after.days
+                WL(:,:,t) = W0(:,:,t);
+                index = group.ZIPs{g};
+                w = W0(index,:,t);
+                d = repmat(sum(w,2),1,N_nodes);
+                w_new = (w+alpha*d.^2/N_nodes)./(1+alpha*d);
+                WL(index,:,t) = w_new;
+            end
+
+            days = after.days;
+            homo_hypo(g,i) = mean(squeeze(sum(WL(group.ZIPs{g},group.ZIPs{g},days),[1 2]))'./group.trip(g,days));
+        end
+
+        [~ , alpha_index] = min(abs(homo_hypo(g,:) - homo_before(g))); 
+        alpha_opt(g) = alpha_vec(alpha_index);
+    end
+
+
+    W_sameHomo = ZIP.W;
+    for g = 1:length(group.ZIPs)
+        alpha = alpha_opt(g);
+        WL = [];
+        W0 = ZIP.W;
+        for t = after.days
+            WL(:,:,t) = W0(:,:,t);
+            index = group.ZIPs{g};
+            w = W0(index,:,t);
+            d = repmat(sum(w,2),1,N_nodes);
+            w_new = (w+alpha*d.^2/N_nodes)./(1+alpha*d);
+            W_sameHomo(index,:,t) = w_new;
+        end
+    end
+
+
+    for g = 1:length(group.ZIPs)
+
+        days = before.days;
+        sameHomo_before(g) = mean(squeeze(sum(W_sameHomo(group.ZIPs{g},group.ZIPs{g},days),[1 2]))'./group.trip(g,days));
+
+        days = after.days;
+        sameHomo_after(g) = mean(squeeze(sum(W_sameHomo(group.ZIPs{g},group.ZIPs{g},days),[1 2]))'./group.trip(g,days));
+    end
+
+    sameHomo_before
+    sameHomo_after
+
+end
+
+
